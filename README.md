@@ -20,14 +20,21 @@ configuration.py     стенд: адрес/порт (STAND) + путь к ре�
 endpoints/
   pult_endpoints.py   сырые пути ручек API
 helpers/
-  api_helper.py        ApiClient — requests.Session + логирование в Allure
+  api_helper.py        ApiClient — requests.Session + логирование запроса/ответа в Allure
   pult_helper.py        PultAPI — фасад с именованными методами над endpoint's
+  allure_helper/
+    allure_assertion.py  assert_status_code/assert_equals/... — каждая проверка
+                            сама оборачивается в allure.step и прикладывает
+                            ожидаемое/фактическое значение, не голый assert
 conftest.py           фикстуры: поднять/погасить сервер, api, clean_state
 tests/
   test_state_api.py     /api/state, /api/yaml, /api/meta
   test_security.py      CSRF (Origin vs Host)
   test_openapi_import.py  /api/openapi
   test_tms_import.py      /api/tms
+# каждый тест: @allure.title("человеко-читаемое название") + тело
+# разбито на именованные with allure.step(...) — в отчёте видна не
+# только пройденная/упавшая точка, а весь ход теста
 scripts/
   send_telegram_notification.py   итоги прогона в Telegram (см. ниже, опционально)
 ```
