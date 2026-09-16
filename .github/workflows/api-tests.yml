@@ -1,0 +1,137 @@
+name: Pult API tests
+
+# У «Пульта качества» нет постоянного стенда и нет прямой связи между
+# репозиториями — поэтому без авто-триггера на мердж в pult-kachestva:
+# запуск вручную (Run workflow, можно указать ветку/тег) либо по расписанию.
+on:
+  workflow_dispatch:
+    inputs:
+      pult_ref:
+        description: "Ветка/тег pult-kachestva для проверки"
+        required: false
+        default: "master"
+      markers:
+        description: "pytest -m фильтр (smoke / regress). Пусто — весь набор"
+        required: false
+        default: ""
+  schedule:
+    - cron: "0 6 * * *"  # раз в сутки, полный набор на master
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    outputs:
+      failed: ${{ steps.stats.outputs.failed }}
+    steps:
+      - name: Checkout tests
+        uses: actions/checkout@v4
+
+      - name: Checkout pult-kachestva
+        uses: actions/checkout@v4
+        with:
+          repository: Snazzykk/pult-kachestva
+          ref: ${{ github.event.inputs.pult_ref || 'master' }}
+          path: pult-kachestva
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Install test dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run tests
+        id: pytest
+        continue-on-error: true
+        env:
+          PULT_REPO_PATH: ${{ github.workspace }}/pult-kachestva
+        run: |
+          MARK="${{ github.event.inputs.markers }}"
+          if [ -n "$MARK" ]; then
+            python -m pytest -v --reruns 2 --reruns-delay 1 \
+              --json-report --json-report-file=pytest-report.json \
+              --alluredir=allure-results -m "$MARK"
+          else
+            python -m pytest -v --reruns 2 --reruns-delay 1 \
+              --json-report --json-report-file=pytest-report.json \
+              --alluredir=allure-results
+          fi
+
+      - name: Generate Allure report
+        if: always()
+        run: |
+          curl -sL -o allure.tgz \
+            https://github.com/allure-framework/allure2/releases/download/2.29.0/allure-2.29.0.tgz
+          tar -xzf allure.tgz
+          ./allure-2.29.0/bin/allure generate allure-results -o allure-report --clean
+
+      - name: Upload Allure results (raw, для отладки)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allure-results
+          path: |
+            allure-results
+            pytest-report.json
+          retention-days: 30
+
+      - name: Upload Pages artifact
+        if: always()
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: allure-report
+
+      - name: Stats from pytest-report.json
+        id: stats
+        if: always()
+        run: |
+          TOTAL=$(jq '.summary.total // 0' pytest-report.json)
+          PASSED=$(jq '.summary.passed // 0' pytest-report.json)
+          FAILED=$(jq '(.summary.failed // 0) + (.summary.error // 0)' pytest-report.json)
+          DURATION=$(jq '.duration | floor' pytest-report.json)
+          echo "total=$TOTAL" >> "$GITHUB_OUTPUT"
+          echo "passed=$PASSED" >> "$GITHUB_OUTPUT"
+          echo "failed=$FAILED" >> "$GITHUB_OUTPUT"
+          echo "duration=$DURATION" >> "$GITHUB_OUTPUT"
+          echo "status=$([ "$FAILED" -eq 0 ] && echo success || echo failed)" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Telegram
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python scripts/send_telegram_notification.py \
+            --total "${{ steps.stats.outputs.total }}" \
+            --passed "${{ steps.stats.outputs.passed }}" \
+            --failed "${{ steps.stats.outputs.failed }}" \
+            --duration "${{ steps.stats.outputs.duration }}" \
+            --ref "${{ github.event.inputs.pult_ref || 'master' }}" \
+            --status "${{ steps.stats.outputs.status }}" \
+            --report-url "https://${{ github.repository_owner }}.github.io/pult-kachestva-tests/" \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Fail the run if tests failed
+        if: steps.stats.outputs.failed != '0'
+        run: |
+          echo "Упавших тестов: ${{ steps.stats.outputs.failed }}"
+          exit 1
+
+  pages:
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,16 @@
+[project]
+name = "pult-kachestva-tests"
+version = "0.1.0"
+description = "Автотесты API «Пульта качества» — отдельный репозиторий, по образцу test-репо тестировщиков"
+requires-python = ">=3.9"
+
+[tool.ruff]
+line-length = 140
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "S"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]  # assert — идиоматичный способ проверки в pytest
