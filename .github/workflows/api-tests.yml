@@ -11,7 +11,7 @@ on:
         required: false
         default: "master"
       markers:
-        description: "pytest -m фильтр (smoke / regress). Пусто — весь набор"
+        description: "Только имя маркера — smoke или regress (БЕЗ слова pytest). Пусто — весь набор"
         required: false
         default: ""
   schedule:
@@ -53,6 +53,8 @@ jobs:
         env:
           PULT_REPO_PATH: ${{ github.workspace }}/pult-kachestva
         run: |
+          set +e  # -e активен по умолчанию (см. `shell:` в логе) — без этого
+                  # строка ниже с $? не выполнится, если pytest вернёт не 0
           MARK="${{ github.event.inputs.markers }}"
           if [ -n "$MARK" ]; then
             python -m pytest -v --reruns 2 --reruns-delay 1 \
@@ -63,6 +65,7 @@ jobs:
               --json-report --json-report-file=pytest-report.json \
               --alluredir=allure-results
           fi
+          echo "exitcode=$?" >> "$GITHUB_OUTPUT"
 
       - name: Generate Allure report
         if: always()
@@ -119,9 +122,16 @@ jobs:
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
       - name: Fail the run if tests failed
-        if: steps.stats.outputs.failed != '0'
+        # failed != 0 — реальные падения; total == 0 — ничего не собралось
+        # (опечатка в markers, битый conftest и т.п.); exitcode как подстраховка
+        # на случай, если pytest упал так, что JSON-отчёт вообще не записался
+        if: >-
+          steps.stats.outputs.failed != '0' ||
+          steps.stats.outputs.total == '0' ||
+          steps.pytest.outputs.exitcode != '0'
         run: |
-          echo "Упавших тестов: ${{ steps.stats.outputs.failed }}"
+          echo "pytest exit code: ${{ steps.pytest.outputs.exitcode }}"
+          echo "Собрано тестов: ${{ steps.stats.outputs.total }}, упало: ${{ steps.stats.outputs.failed }}"
           exit 1
 
   pages:
