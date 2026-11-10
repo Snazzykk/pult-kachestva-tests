@@ -1,0 +1,137 @@
+name: AI review (manual pilot)
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Номер открытого PR в этом репозитории"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ai-review-${{ inputs.pr_number }}
+  cancel-in-progress: false
+
+jobs:
+  review:
+    # Запускать доверенную версию workflow и launcher только из default branch.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: "1"
+      REVIEWER_REVISION: 07ea5f46644fe176e3b17945f150ef9fcc9a704c
+    steps:
+      - name: Validate configuration and resolve PR commits
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REVIEW_SOURCE_KEY: ${{ secrets.AI_REVIEW_SOURCE_SSH_KEY }}
+          REVIEW_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          REVIEW_API_URL: ${{ vars.AI_REVIEW_BASE_URL }}
+          REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]] || { echo 'pr_number must be a positive integer'; exit 1; }
+          for required in REVIEW_SOURCE_KEY REVIEW_API_KEY REVIEW_API_URL REVIEW_MODEL; do
+            [[ -n "${!required}" ]] || { echo "Missing configuration: $required"; exit 1; }
+          done
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/review-pr.json"
+          python -I - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          pr = json.loads((Path(os.environ['RUNNER_TEMP']) / 'review-pr.json').read_text())
+          if pr['state'] != 'open':
+              raise SystemExit('The pilot accepts only open PRs.')
+          if not pr['head']['repo'] or pr['head']['repo']['full_name'] != os.environ['GITHUB_REPOSITORY']:
+              raise SystemExit('The first pilot accepts only branches in this repository, not forks.')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              for name in ('base', 'head'):
+                  sha = pr[name]['sha']
+                  if not re.fullmatch(r'[0-9a-f]{40}', sha):
+                      raise SystemExit('Invalid commit SHA from GitHub.')
+                  output.write(f'{name}={sha}\n')
+          PY
+
+      - name: Checkout trusted launcher
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+
+      - name: Checkout reviewed code as data
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr.outputs.head }}
+          fetch-depth: 0
+          path: reviewed
+          persist-credentials: false
+
+      - name: Checkout private review engine
+        uses: actions/checkout@v4
+        with:
+          repository: Snazzykk/AI-CICD
+          ref: ${{ env.REVIEWER_REVISION }}
+          ssh-key: ${{ secrets.AI_REVIEW_SOURCE_SSH_KEY }}
+          path: engine
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install review engine
+        run: >-
+          python -I -m pip install --disable-pip-version-check
+          --index-url https://pypi.org/simple
+          ./engine/ai-review-study/aireviewer
+
+      - name: Review PR through model API
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          AI_REVIEW_BASE_URL: ${{ vars.AI_REVIEW_BASE_URL }}
+          AI_REVIEW_MODEL: ${{ vars.AI_REVIEW_MODEL }}
+          BASE_SHA: ${{ steps.pr.outputs.base }}
+          HEAD_SHA: ${{ steps.pr.outputs.head }}
+          CONTEXT_TOKENS: ${{ vars.AI_REVIEW_CONTEXT_TOKENS || '32768' }}
+        run: |
+          python -I -X utf8 control/scripts/ai_review.py \
+            --economy \
+            --repository-root "$GITHUB_WORKSPACE/reviewed" \
+            --base "$BASE_SHA" --head "$HEAD_SHA" \
+            --context-tokens "$CONTEXT_TOKENS" \
+            --output-dir "$RUNNER_TEMP/ai-review-result"
+
+      - name: Add report to run summary
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "$RUNNER_TEMP/ai-review-result/ai-review-summary.md" ]]; then
+            cat "$RUNNER_TEMP/ai-review-result/ai-review-summary.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'AI review report was not produced. Check the failed step; this is not a successful review.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload review reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-review-pr-${{ inputs.pr_number }}-${{ github.run_id }}
+          retention-days: 3
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/ai-review-result/ai-review-summary.md
+            ${{ runner.temp }}/ai-review-result/ai-review-findings.json
+            ${{ runner.temp }}/ai-review-result/ai-review-usage.json
+            ${{ runner.temp }}/ai-review-result/gl-code-quality-report.json

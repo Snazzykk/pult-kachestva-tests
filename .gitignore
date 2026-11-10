@@ -7,3 +7,5 @@ venv/
 .venv/
 .env
 pytest-report.json
+ai-review-results/
+.venv-review/
