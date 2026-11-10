@@ -10,7 +10,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
 
 concurrency:
   group: ai-review-${{ inputs.pr_number }}
@@ -135,3 +135,44 @@ jobs:
             ${{ runner.temp }}/ai-review-result/ai-review-findings.json
             ${{ runner.temp }}/ai-review-result/ai-review-usage.json
             ${{ runner.temp }}/ai-review-result/gl-code-quality-report.json
+
+      - name: Publish review and inline comments to PR
+        if: success()
+        uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REVIEWED_SHA: ${{ steps.pr.outputs.head }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const pull_number = Number(process.env.PR_NUMBER);
+            const commit_id = process.env.REVIEWED_SHA;
+            const location = { ...context.repo, pull_number };
+            const { data: pr } = await github.rest.pulls.get(location);
+            if (pr.state !== 'open' || pr.head.sha !== commit_id) {
+              throw new Error('PR closed or changed during review; report remains in run artifacts.');
+            }
+            const directory = path.join(process.env.RUNNER_TEMP, 'ai-review-result');
+            const summary = fs.readFileSync(path.join(directory, 'ai-review-summary.md'), 'utf8');
+            const findings = JSON.parse(fs.readFileSync(path.join(directory, 'ai-review-findings.json'), 'utf8'));
+            const marker = `<!-- ai-reviewer:run:${context.runId} -->`;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `${marker}\nAI-отчёт: [запуск Actions](${runUrl}). Это автоматическое ревью, не одобрение PR.\n\n${summary.slice(0, 45000)}`;
+            const reviews = await github.paginate(github.rest.pulls.listReviews, location);
+            const existing = reviews.find(r => r.user.type === 'Bot' && r.body.includes(marker));
+            if (existing) {
+              await github.rest.pulls.updateReview({ ...location, review_id: existing.id, body });
+              core.info(`Review already published: ${existing.html_url}`);
+              return;
+            }
+            const comments = findings.slice(0, 25).map(f => ({
+              path: f.path,
+              line: f.line,
+              side: 'RIGHT',
+              body: `**${f.severity}: ${f.title}**\n\n${f.description}`.slice(0, 8000)
+            }));
+            const { data: review } = await github.rest.pulls.createReview({
+              ...location, commit_id, event: 'COMMENT', body, comments
+            });
+            core.info(`Published review: ${review.html_url}`);
