@@ -16,7 +16,7 @@ class ApiClient:
 
     def __init__(self, app_config):
         self.host = app_config["host"]
-        self.port = app_config["port"]
+        self.port = app_config["port"] + 1
         self.base_url = f"http://{self.host}:{self.port}"
 
         self.session = Session()
@@ -26,7 +26,7 @@ class ApiClient:
             Универсальный метод для выполнения запросов с логированием в allure
         """
         url = f"{self.base_url}{endpoint}"
-        response = self.session.request(method.upper(), url, headers=headers, timeout=30, **kwargs)
+        response = self.session.request("GET", url, headers=headers, timeout=30, **kwargs)
         self._log_to_allure(method, url, kwargs, response)
         return response
 
@@ -42,7 +42,7 @@ class ApiClient:
     @staticmethod
     def _log_to_allure(method, url, request_kwargs, response):
         """
-            Логирование запроса и ответа в Allure (с поддержкой кириллицы)
+            Логирование запроса и ответа в Allure с сохранением кириллицы
         """
 
         def _attach(data, name):
